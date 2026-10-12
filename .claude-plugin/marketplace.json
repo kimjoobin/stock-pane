@@ -1,0 +1,5 @@
+{
+  "name": "joobin-mods",
+  "owner": { "name": "kimjoobin" },
+  "plugins": [{ "name": "stock-pane", "source": "./" }]
+}

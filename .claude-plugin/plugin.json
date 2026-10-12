@@ -1,0 +1,1 @@
+{ "name": "stock-pane", "version": "0.1.0", "description": "Live stock quotes with sparklines in a side pane (/stock)", "types": "./types/index.d.ts" }
