@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Quote } from '../types'
+import type { PollStatus, Quote } from '../types'
 
 const PANE = 'stocks'
 const POLL_MS = 10_000
@@ -28,6 +28,7 @@ const INDEX: Record<string, [string, string]> = {
 export const findIndex = (t: string) => INDEX[t.replace(/지수$/, '').replace(/\s/g, '').toUpperCase()]
 const BARS = '▁▂▃▄▅▆▇█'
 const quotes = atom({ plugin: 'stock-pane', key: 'quotes' } as const, [])
+const status = atom({ plugin: 'stock-pane', key: 'status' } as const, {} as PollStatus)
 
 // ponytail: 비공식 Yahoo spark API — 전 종목을 요청 1번에. 막히면 다른 시세 API로 교체
 const sparkUrl = (syms: string[]) =>
@@ -89,15 +90,15 @@ export const parseSpark = (syms: string[], text: string): Quote[] => {
   })
 }
 
-// undefined = 일시 실패(429 등) — 직전 시세를 그대로 둔다
-const fetchQuotes = async ($: EngineInterface, syms: string[]): Promise<Quote[] | undefined> => {
+// 문자열 = 일시 실패(429 등)의 사유 — 직전 시세를 그대로 둔다
+const fetchQuotes = async ($: EngineInterface, syms: string[]): Promise<Quote[] | string> => {
   try {
     // UA 없으면 429
     const res = await $.http.fetch(sparkUrl(syms), { headers: UA })
     if (res.ok) return parseSpark(syms, res.text)
-    return res.status === 404 ? parseSpark(syms, '{}') : undefined
+    return res.status === 404 ? parseSpark(syms, '{}') : `HTTP ${res.status}`
   } catch {
-    return undefined
+    return '네트워크 오류'
   }
 }
 
@@ -114,14 +115,14 @@ const fetchKrLive = async ($: EngineInterface, syms: string[]): Promise<Record<s
   }
 }
 
-// 시세 서버가 실패하면(429 등) false
-const refresh = async ($: EngineInterface): Promise<boolean> => {
+// 실패하면(429 등) 사유를, 성공하면 undefined를 돌려준다
+const refresh = async ($: EngineInterface): Promise<string | undefined> => {
   const syms = ((await $.store.get('symbols')) as string[] | undefined) ?? DEFAULT_SYMS
   const labels = { ...DEFAULT_LABELS, ...((await $.store.get('labels')) as Record<string, string> | undefined) }
   const [list, kr] = await Promise.all([fetchQuotes($, syms), fetchKrLive($, syms)])
-  if (!list) {
+  if (typeof list === 'string') {
     await update($, quotes, old => (old.length > 0 ? old : syms.map(sym => ({ sym, closes: [], error: '시세 서버 응답 없음' }))))
-    return false
+    return list
   }
   await update($, quotes, () =>
     list.map(q => {
@@ -130,7 +131,21 @@ const refresh = async ($: EngineInterface): Promise<boolean> => {
       return { ...merged, name: labels[q.sym] ?? q.sym }
     }),
   )
-  return true
+  return undefined
+}
+
+// 한 번 갱신하고 백오프와 상태 줄을 맞춘다
+const poll = async ($: EngineInterface) => {
+  const failed = await refresh($)
+  fails = failed ? fails + 1 : 0
+  skip = backoffSkips(fails)
+  const now = await $.clock.now()
+  await update($, status, s => (failed ? { ...s, failed, retrySec: ((skip + 1) * POLL_MS) / 1000 } : { lastOk: now }))
+}
+
+export const hms = (ms: number) => {
+  const d = new Date(ms)
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':')
 }
 
 // 패널이 닫히면 다음 틱에서 폴링을 멈춘다
@@ -146,8 +161,7 @@ const startPolling = ($: EngineInterface) => {
       skip--
       return
     }
-    fails = (await refresh($)) ? 0 : fails + 1
-    skip = backoffSkips(fails)
+    await poll($)
   })
 }
 
@@ -193,7 +207,7 @@ export const register: Register = on => {
       }
     }
     const opened = await $.ui.open({ id: PANE, title: '주식' })
-    await refresh($)
+    await poll($)
     startPolling($)
 
     const note = missed.length > 0 ? ` 못 찾은 종목: ${missed.join(', ')}` : ''
@@ -203,6 +217,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, quotes)
+    const st = await read($, status)
     const width = Math.max(10, e.props.bodyColumns)
 
     return (
@@ -225,7 +240,15 @@ export const register: Register = on => {
             </Box>
           )
         })}
-        <Text dimColor>{POLL_MS / 1000}초마다 갱신 · 미국 Yahoo · 한국 네이버 실시간</Text>
+        {st.failed ? (
+          <Text color="warning">
+            ⚠ 갱신 실패({st.failed}) · {st.retrySec}초 간격 재시도{st.lastOk ? ` · 마지막 성공 ${hms(st.lastOk)}` : ''}
+          </Text>
+        ) : (
+          <Text dimColor>
+            {POLL_MS / 1000}초마다 갱신{st.lastOk ? ` · 마지막 ${hms(st.lastOk)}` : ''}
+          </Text>
+        )}
       </Box>
     )
   })

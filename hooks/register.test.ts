@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { backoffSkips, findIndex, parseSpark, spark, toYahoo } from './register'
+import { backoffSkips, findIndex, hms, parseSpark, spark, toYahoo } from './register'
 
 test('spark: 폭에 맞추고 마지막 칸은 최신가', async () => {
   expect(spark([1, 2, 3, 4, 5, 6, 7, 8], 8)).toBe('▁▂▃▄▅▆▇█')
@@ -34,4 +34,8 @@ test('findIndex: 지수 이름은 NDAQ 같은 회사 주식이 아니라 지수 
 
 test('backoffSkips: 실패할수록 10→20→40→60초, 60초에서 멈춤', async () => {
   expect([0, 1, 2, 3, 10].map(backoffSkips)).toEqual([0, 1, 3, 5, 5])
+})
+
+test('hms: 로컬 시각을 두 자리씩', async () => {
+  expect(hms(new Date(2026, 9, 12, 9, 5, 7).getTime())).toBe('09:05:07')
 })
