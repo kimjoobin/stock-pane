@@ -4,7 +4,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { Quote } from '../types'
 
 const PANE = 'stocks'
-const POLL_MS = 5_000
+const POLL_MS = 10_000
 // 나스닥 · S&P500 · 코스피 · 다우존스
 const DEFAULT_SYMS = ['^IXIC', '^GSPC', '^KS11', '^DJI']
 const DEFAULT_LABELS: Record<string, string> = { '^IXIC': '나스닥', '^GSPC': 'S&P 500', '^KS11': '코스피', '^DJI': '다우존스' }
@@ -39,6 +39,11 @@ const UA = { 'User-Agent': 'Mozilla/5.0' }
 const NEEDS_LOOKUP = /[가-힣]|^\d{6}$/
 
 let timer: Timer | undefined
+let fails = 0 // 연속 실패(429 등) 횟수
+let skip = 0 // 쉬어 갈 남은 틱 수
+
+// 실패가 이어지면 10초 → 20초 → 40초 → 최대 60초로 늘린다
+export const backoffSkips = (n: number) => Math.min(2 ** n, 6) - 1
 
 type NaverItem = { code: string; name: string; typeCode: string; nationCode: string }
 
@@ -109,13 +114,14 @@ const fetchKrLive = async ($: EngineInterface, syms: string[]): Promise<Record<s
   }
 }
 
-const refresh = async ($: EngineInterface) => {
+// 시세 서버가 실패하면(429 등) false
+const refresh = async ($: EngineInterface): Promise<boolean> => {
   const syms = ((await $.store.get('symbols')) as string[] | undefined) ?? DEFAULT_SYMS
   const labels = { ...DEFAULT_LABELS, ...((await $.store.get('labels')) as Record<string, string> | undefined) }
   const [list, kr] = await Promise.all([fetchQuotes($, syms), fetchKrLive($, syms)])
   if (!list) {
     await update($, quotes, old => (old.length > 0 ? old : syms.map(sym => ({ sym, closes: [], error: '시세 서버 응답 없음' }))))
-    return
+    return false
   }
   await update($, quotes, () =>
     list.map(q => {
@@ -124,6 +130,7 @@ const refresh = async ($: EngineInterface) => {
       return { ...merged, name: labels[q.sym] ?? q.sym }
     }),
   )
+  return true
 }
 
 // 패널이 닫히면 다음 틱에서 폴링을 멈춘다
@@ -135,7 +142,12 @@ const startPolling = ($: EngineInterface) => {
       timer = undefined
       return
     }
-    await refresh($)
+    if (skip > 0) {
+      skip--
+      return
+    }
+    fails = (await refresh($)) ? 0 : fails + 1
+    skip = backoffSkips(fails)
   })
 }
 
